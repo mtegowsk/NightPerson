@@ -2,6 +2,7 @@ import requests
 import json
 import re
 import os
+import argparse
 
 # --- Configuration ------------------------------------------------------------
 BASE_URL  = "https://gtax-postsi-igk.intel.com/api/v1"
@@ -10,14 +11,14 @@ PASSWORD  = os.environ.get("ABN_AF_PASSWORD") # Replace with your Intel password
 AUTH      = (USERNAME, PASSWORD)
 HEADERS   = {"Content-Type": "application/json"}
 
-# --- Target Job & Resource Configuration -------------------------------------
-ORIGINAL_JOB_ID  = 110271955         # ? Replace with your actual job ID from jobset 56199692
-JOBSET_ID        = 56166023       # The jobset to rerun the job in
-
-# Resource version replacement details
-# These values depend on your TaskML structure — adjust as needed
-OLD_RESOURCE_VERSION = "ABN-vdev-7863-20260421-074054-mtegowsk-f7336ca7"    # ? The version string to replace
-NEW_RESOURCE_VERSION = "ABN-vdev-7869-20260422-101249-apaliswi-b0e09e6b"    # ? The new version string to use
+# --- Argument Parsing ---------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="GTA-X: Rerun Job with Modified Resource Version")
+    parser.add_argument("--job-id",      type=int, required=True, help="Original job ID to rerun")
+    parser.add_argument("--jobset-id",   type=int, default=None, help="Jobset ID to submit the new job into (auto-detected from original job if omitted)")
+    parser.add_argument("--old-version", type=str, default=None,  help="Resource version string to replace (auto-detected from TaskML if omitted)")
+    parser.add_argument("--new-version", type=str, required=True, help="New resource version string to use")
+    return parser.parse_args()
 
 # --- Step 1: Fetch the Original Job's TaskML ----------------------------------
 def get_job_taskml(job_id):
@@ -39,6 +40,38 @@ def get_job_taskml(job_id):
         raise Exception(f"? Job {job_id} not found!")
     else:
         raise Exception(f"? Failed to fetch job: {response.status_code} — {response.text}")
+
+
+# --- Step 1b: Deduce the Resource Version from TaskML -----------------------
+def deduce_resource_version(taskml):
+    """
+    Attempt to auto-detect the resource version string from the TaskML.
+    Looks for strings matching the pattern: WORD-WORD-digits-date-time-user-hash
+    e.g. ABN-vdev-7863-20260421-074054-mtegowsk-f7336ca7
+    Returns the first match found, or raises if none detected.
+    """
+    if isinstance(taskml, dict):
+        taskml_str = json.dumps(taskml)
+    else:
+        taskml_str = str(taskml)
+
+    pattern = r'ABN-vdev-\d+-\d{8}-\d{6}-[A-Za-z0-9]+-[a-f0-9]+'
+    matches = list(dict.fromkeys(re.findall(pattern, taskml_str)))  # deduplicated, order-preserved
+
+    if not matches:
+        raise Exception("Could not auto-detect a resource version from the TaskML. "
+                        "Please supply --old-version explicitly.")
+
+    if len(matches) > 1:
+        print("[Auto-detect] Multiple version candidates found in TaskML:")
+        for i, m in enumerate(matches):
+            print(f"  [{i}] {m}")
+        print(f"[Auto-detect] Using first candidate: {matches[0]}")
+        print("  Pass --old-version explicitly to override.")
+    else:
+        print(f"[Auto-detect] Detected resource version: {matches[0]}")
+
+    return matches[0]
 
 
 # --- Step 2: Modify the Resource Version in the TaskML ------------------------
@@ -81,7 +114,7 @@ def modify_resource_version(taskml, old_version, new_version):
 
 
 # --- Step 3: Submit a New Job with the Modified TaskML ------------------------
-def submit_job_with_modified_taskml(jobset_id, modified_taskml_str, original_job_name=""):
+def submit_job_with_modified_taskml(jobset_id, modified_taskml_str, new_version, original_job_name=""):
     """
     Submit a new job to the same jobset with the modified TaskML.
     Uses POST /jobs with job_data containing the modified TaskML.
@@ -90,10 +123,12 @@ def submit_job_with_modified_taskml(jobset_id, modified_taskml_str, original_job
 
     url = f"{BASE_URL}/jobs"
     payload = {
-        "job_name": f"{original_job_name} [Rerun - Resource v{NEW_RESOURCE_VERSION}]",
+        "job_name": f"{original_job_name} [Rerun - Resource v{new_version}]",
         "job_data": modified_taskml_str,  # The modified TaskML
         "submitter": USERNAME,
     }
+    if jobset_id is not None:
+        payload["jobset_id"] = jobset_id
 
     response = requests.post(url, json=payload, auth=AUTH, headers=HEADERS)
 
@@ -147,6 +182,13 @@ def inspect_taskml_resources(taskml):
 
 # --- Main Workflow -------------------------------------------------------------
 if __name__ == "__main__":
+    args = parse_args()
+
+    ORIGINAL_JOB_ID      = args.job_id
+    JOBSET_ID            = args.jobset_id
+    OLD_RESOURCE_VERSION = args.old_version
+    NEW_RESOURCE_VERSION = args.new_version
+
     print("=" * 65)
     print("GTA-X: Rerun Job with Modified Resource Version")
     print(f"Instance : https://gtax-postsi-igk.intel.com")
@@ -162,11 +204,16 @@ if __name__ == "__main__":
     # Optional: Inspect TaskML to find resource version paths
     inspect_taskml_resources(taskml)
 
+    # Auto-detect old version from TaskML if not provided
+    if OLD_RESOURCE_VERSION is None:
+        OLD_RESOURCE_VERSION = deduce_resource_version(taskml)
+        print(f"   Using auto-detected version: {OLD_RESOURCE_VERSION}")
+
     # Step 2: Modify the resource version
     modified_taskml = modify_resource_version(taskml, OLD_RESOURCE_VERSION, NEW_RESOURCE_VERSION)
 
     # Step 3: Submit the new job with the modified TaskML
-    new_job = submit_job_with_modified_taskml(JOBSET_ID, modified_taskml, original_job_name)
+    new_job = submit_job_with_modified_taskml(JOBSET_ID, modified_taskml, NEW_RESOURCE_VERSION, original_job_name)
 
     if new_job:
         print("\n? Workflow complete!")
