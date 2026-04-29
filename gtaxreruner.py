@@ -11,12 +11,16 @@ PASSWORD  = os.environ.get("ABN_AF_PASSWORD") # Replace with your Intel password
 AUTH      = (USERNAME, PASSWORD)
 HEADERS   = {"Content-Type": "application/json"}
 
+# Resource version patterns
+MANUAL_VERSION_PATTERN = r'ABN-vdev-\d+-\d{8}-\d{6}-[A-Za-z0-9]+-[a-f0-9]+'
+CI_VERSION_PATTERN     = r'ABN-v\d+\.\d+\.\d+'
+
 # --- Argument Parsing ---------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(description="GTA-X: Rerun Job with Modified Resource Version")
     parser.add_argument("--job-id",      type=int, required=True, help="Original job ID to rerun")
     parser.add_argument("--jobset-id",   type=int, default=None, help="Jobset ID to submit the new job into (auto-detected from original job if omitted)")
-    parser.add_argument("--old-version", type=str, default=None,  help="Resource version string to replace (auto-detected from TaskML if omitted)")
+    parser.add_argument("--old-version", type=str, default=None,  help="Resource version string to replace (auto-detected from TaskML if omitted). Accepts ABN-manual format (ABN-vdev-...) or ABN-CI format (ABN-v2.9.335)")
     parser.add_argument("--new-version", type=str, required=True, help="New resource version string to use")
     return parser.parse_args()
 
@@ -46,30 +50,40 @@ def get_job_taskml(job_id):
 def deduce_resource_version(taskml):
     """
     Attempt to auto-detect the resource version string from the TaskML.
-    Looks for strings matching the pattern: WORD-WORD-digits-date-time-user-hash
-    e.g. ABN-vdev-7863-20260421-074054-mtegowsk-f7336ca7
-    Returns the first match found, or raises if none detected.
+
+    Recognises two formats:
+      ABN-manual : ABN-vdev-7863-20260421-074054-mtegowsk-f7336ca7
+      ABN-CI     : ABN-v2.9.335
+
+    Returns the first match found (manual format takes priority), or raises if
+    neither is detected.
     """
     if isinstance(taskml, dict):
         taskml_str = json.dumps(taskml)
     else:
         taskml_str = str(taskml)
 
-    pattern = r'ABN-vdev-\d+-\d{8}-\d{6}-[A-Za-z0-9]+-[a-f0-9]+'
-    matches = list(dict.fromkeys(re.findall(pattern, taskml_str)))  # deduplicated, order-preserved
+    # Try ABN-manual format first
+    matches = list(dict.fromkeys(re.findall(MANUAL_VERSION_PATTERN, taskml_str)))
+    version_type = "ABN-manual"
+
+    # Fall back to ABN-CI format
+    if not matches:
+        matches = list(dict.fromkeys(re.findall(CI_VERSION_PATTERN, taskml_str)))
+        version_type = "ABN-CI"
 
     if not matches:
         raise Exception("Could not auto-detect a resource version from the TaskML. "
                         "Please supply --old-version explicitly.")
 
     if len(matches) > 1:
-        print("[Auto-detect] Multiple version candidates found in TaskML:")
+        print(f"[Auto-detect] Multiple {version_type} version candidates found in TaskML:")
         for i, m in enumerate(matches):
             print(f"  [{i}] {m}")
         print(f"[Auto-detect] Using first candidate: {matches[0]}")
         print("  Pass --old-version explicitly to override.")
     else:
-        print(f"[Auto-detect] Detected resource version: {matches[0]}")
+        print(f"[Auto-detect] Detected {version_type} resource version: {matches[0]}")
 
     return matches[0]
 
@@ -79,38 +93,40 @@ def modify_resource_version(taskml, old_version, new_version):
     """
     Modify the resource version in the TaskML.
 
-    The TaskML can be either:
-    - A dict (parsed JSON) — do a deep string replacement
-    - A string — do a direct string replacement
-    
-    Adjust this function based on your actual TaskML structure.
-    For example, TaskML often looks like:
-    {
-      "resources": [
-        {"name": "my_package", "version": "1.0.0", "uri": "..."}
-      ]
-    }
+    Handles two cases:
+      ABN-manual : replaces the version string only.
+      ABN-CI     : replaces the version string AND renames the resource
+                   from 'ABN-CI' to 'ABN-manual'.
     """
-    print(f"[Step 2] Modifying resource version: {old_version} ? {new_version}")
+    print(f"[Step 2] Modifying resource version: {old_version} → {new_version}")
 
-    # Convert to string if it's a dict
     if isinstance(taskml, dict):
         taskml_str = json.dumps(taskml)
     else:
         taskml_str = str(taskml)
 
-    # Count occurrences before replacing
+    # Detect whether old_version is a CI-style version (ABN-v2.9.335)
+    is_ci_version = bool(re.fullmatch(CI_VERSION_PATTERN, old_version))
+
+    # Replace the version string
     count = taskml_str.count(old_version)
     if count == 0:
-        print(f"??  Warning: Old version '{old_version}' not found in TaskML!")
+        print(f"⚠️  Warning: Old version '{old_version}' not found in TaskML!")
         print("     Review the TaskML structure and adjust version strings accordingly.")
     else:
         print(f"   Found {count} occurrence(s) of '{old_version}' — replacing all with '{new_version}'")
+    taskml_str = taskml_str.replace(old_version, new_version)
 
-    modified_taskml_str = taskml_str.replace(old_version, new_version)
+    # For CI versions also rename the resource type ABN-CI -> ABN-manual
+    if is_ci_version:
+        ci_count = taskml_str.count('"ABN-CI"')
+        if ci_count == 0:
+            print("⚠️  Warning: 'ABN-CI' resource name not found in TaskML after version replacement.")
+        else:
+            print(f"   Found {ci_count} occurrence(s) of '\"ABN-CI\"' — renaming to '\"ABN-manual\"'")
+        taskml_str = taskml_str.replace('"ABN-CI"', '"ABN-manual"')
 
-    # Return as string (job_data field expects a JSON string)
-    return modified_taskml_str
+    return taskml_str
 
 
 # --- Step 3: Submit a New Job with the Modified TaskML ------------------------
