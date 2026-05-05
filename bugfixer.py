@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import argparse
+import subprocess
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,46 @@ def analyse_job(job_id: int, output_dir: Path) -> tuple[str, list[Path], list[Pa
 
 
 # ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+def git_commit_and_push(repo_path: Path, message: str) -> None:
+    """
+    Stage all changes, commit with the given message, and push.
+    Prints a warning (but does not raise) if nothing to commit or push fails.
+    """
+    def run(args: list) -> subprocess.CompletedProcess:
+        return subprocess.run(args, cwd=repo_path, capture_output=True, text=True)
+
+    print("\n" + "=" * 68)
+    print("  Git: checking for changes ...")
+    print("=" * 68)
+
+    status = run(["git", "status", "--porcelain"])
+    if not status.stdout.strip():
+        print("  No changes detected — nothing to commit.")
+        return
+
+    print(f"  Changes detected:\n{status.stdout.rstrip()}")
+
+    add = run(["git", "add", "-A"])
+    if add.returncode != 0:
+        print(f"  WARNING: git add failed:\n{add.stderr}")
+        return
+
+    commit = run(["git", "commit", "-m", message])
+    if commit.returncode != 0:
+        print(f"  WARNING: git commit failed:\n{commit.stderr}")
+        return
+    print(f"  Committed: {commit.stdout.strip()}")
+
+    push = run(["git", "push"])
+    if push.returncode != 0:
+        print(f"  WARNING: git push failed:\n{push.stderr}")
+        return
+    print("  Pushed successfully.")
+
+
+# ---------------------------------------------------------------------------
 # Copilot session
 # ---------------------------------------------------------------------------
 async def run_copilot(prompt: str):
@@ -185,6 +226,11 @@ async def run_copilot(prompt: str):
     response = await session.send_and_wait(prompt, timeout=600)
     print(response.data.content)
     await client.stop()
+
+    # Commit and push any changes Copilot made to the codebase
+    repo_path  = Path.cwd()
+    commit_msg = f"bugfixer: apply Copilot fix\n\nPrompt: {prompt[:200]}"
+    git_commit_and_push(repo_path, commit_msg)
 
 
 # ---------------------------------------------------------------------------
