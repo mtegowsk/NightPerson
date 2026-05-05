@@ -38,8 +38,8 @@ BASE_URL = os.environ.get("GTAX_BASE_URL", "https://gtax-postsi-igk.intel.com")
 DEBUG    = os.environ.get("DEBUG", "0") == "1"
 
 # File type detection
-ABN_LOG_KEYWORDS      = ["abn", "stderr", "stdout"]
-ABN_LOG_EXTENSIONS    = {".log", ".txt"}
+ABN_LOG_KEYWORDS      = ["abn"]
+ABN_LOG_EXTENSIONS    = {".log"}
 SCREENSHOT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff", ".webp"}
 
 
