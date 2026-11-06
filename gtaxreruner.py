@@ -31,7 +31,7 @@ def get_job_taskml(job_id):
     url = f"{BASE_URL}/jobs/{job_id}"
     params = {"include_taskml": True}
 
-    response = requests.get(url, params=params, auth=AUTH, headers=HEADERS)
+    response = requests.get(url, params=params, auth=AUTH, verify=False, headers=HEADERS)
     if response.status_code == 200:
         job_data = response.json()
         taskml = job_data.get("taskml") or job_data.get("data") 
@@ -146,7 +146,7 @@ def submit_job_with_modified_taskml(jobset_id, modified_taskml_str, new_version,
     if jobset_id is not None:
         payload["jobset_id"] = jobset_id
 
-    response = requests.post(url, json=payload, auth=AUTH, headers=HEADERS)
+    response = requests.post(url, json=payload, auth=AUTH, verify=False, headers=HEADERS)
 
     if response.status_code == 200:
         new_job = response.json()

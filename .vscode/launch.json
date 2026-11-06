@@ -1,0 +1,30 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "G:\\repos\\applications.validation.autobench-next.core",
+            "args": ["--new-version", "ABN-vdev-8203-20260709-095109-mtegowsk-42d34f10", "--job-id", "113686018"]
+        },
+        {
+            "name": "Python Debugger: Bugfixer",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/bugfixer.py",
+            "console": "integratedTerminal",
+            "cwd": "G:\\repos\\applications.validation.autobench-next.core",
+            "args": [
+                "--prompt", "Investigate the first failed task and fix the test.",
+                "--job-id", "119989654"
+            ]
+        }
+    ]
+}

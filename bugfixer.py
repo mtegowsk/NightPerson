@@ -5,6 +5,7 @@ import argparse
 import subprocess
 import functools
 import winreg
+import tempfile
 import importlib
 from pathlib import Path
 
@@ -175,7 +176,7 @@ def analyse_job(job_id: int, output_dir: Path) -> tuple[str, list[Path], list[Pa
 # ProxyCap control
 # ---------------------------------------------------------------------------
 _PROXYCAP_HIVE    = winreg.HKEY_LOCAL_MACHINE
-_PROXYCAP_SUBKEY  = r"SOFTWARE\Proxy Labs\ProxyCap"
+_PROXYCAP_SUBKEY  = r"SOFTWARE\WOW6432Node\Proxy Labs\ProxyCap"
 _PROXYCAP_VALUE   = "Disabled"
 _PROXYCAP_CHECK_URL = "https://store.steampowered.com/"
 _PROXYCAP_SETTLE_S  = 2   # seconds to wait after each registry change
@@ -274,20 +275,26 @@ def git_commit_and_push(repo_path: Path, message: str) -> None:
 
     add = run(["git", "add", "-A"])
     if add.returncode != 0:
-        print(f"  WARNING: git add failed:\n{add.stderr}")
-        return
+        print(f"  ERROR: git add failed:\n{add.stderr}")
+        sys.exit(1)
 
     commit = run(["git", "commit", "-m", message])
     if commit.returncode != 0:
-        print(f"  WARNING: git commit failed:\n{commit.stderr}")
-        return
+        print(f"  ERROR: git commit failed:\n{commit.stderr}")
+        sys.exit(1)
     print(f"  Committed: {commit.stdout.strip()}")
 
-    push = run(["git", "push"])
-    if push.returncode != 0:
-        print(f"  WARNING: git push failed:\n{push.stderr}")
-        return
-    print("  Pushed successfully.")
+    _set_proxycap(disabled=False)
+    _wait_for_proxycap(expected_active=True)
+    try:
+        push = run(["git", "push"])
+        if push.returncode != 0:
+            print(f"  ERROR: git push failed:\n{push.stderr}")
+            sys.exit(1)
+        print("  Pushed successfully.")
+    finally:
+        _set_proxycap(disabled=True)
+        _wait_for_proxycap(expected_active=False)
 
 
 # ---------------------------------------------------------------------------
@@ -297,16 +304,24 @@ async def start_copilot_session():
     """Create and return (client, session) that stay alive across iterations."""
     print("\n  [ProxyCap] Enabling ProxyCap for Copilot ...")
     _set_proxycap(disabled=False)
-    _wait_for_proxycap(expected_active=True)
-
-    client = CopilotClient()
-    await client.start()
-
-    session = await client.create_session(
-        on_permission_request=PermissionHandler.approve_all,
-        model="claude-sonnet-4.6",
-        streaming=True,
-    )
+    client = None
+    try:
+        _wait_for_proxycap(expected_active=True)
+        client = CopilotClient()
+        await client.start()
+        # Let the SDK select the account's available default model.
+        session = await client.create_session(
+            on_permission_request=PermissionHandler.approve_all,
+            streaming=True,
+        )
+    except BaseException:
+        try:
+            if client is not None:
+                await client.stop()
+        finally:
+            _set_proxycap(disabled=True)
+            _wait_for_proxycap(expected_active=False)
+        raise
 
     def handle(event):
         if event.type == SessionEventType.ASSISTANT_MESSAGE_DELTA:
@@ -327,7 +342,7 @@ async def send_to_copilot(session, prompt: str):
     _set_proxycap(disabled=False)
     _wait_for_proxycap(expected_active=True)
     try:
-        response = await session.send_and_wait(prompt, timeout=600)
+        response = await session.send_and_wait(prompt, timeout=1200)
         print(response.data.content)
     finally:
         _set_proxycap(disabled=True)
@@ -423,6 +438,44 @@ def wait_for_job_completion(job_id: int) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Resolve job ID from jobset
+# ---------------------------------------------------------------------------
+def get_first_job_in_jobset(jobset_id: int) -> int:
+    """
+    Fetch jobs in a jobset and return the ID of the first one.
+    Polls for up to 5 minutes since jobs may not appear immediately.
+    """
+    import os
+    auth = (os.environ["ABN_AF_USER"], os.environ["ABN_AF_PASSWORD"])
+    base = "https://gtax-postsi-igk.intel.com/api/v1"
+    url  = f"{base}/jobsets/{jobset_id}/jobs"
+    params = {"page": 1, "per_page": 10, "order_by": "id", "order_type": "asc"}
+
+    deadline = time.time() + 3600  # one hour
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            resp = _requests.get(url, auth=auth, verify=False, timeout=30, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            jobs = data if isinstance(data, list) else data.get("data", data)
+            if jobs:
+                job_id = jobs[0].get("id")
+                print(f"  Jobset {jobset_id} → first job ID: {job_id}  (attempt #{attempt})")
+                return job_id
+        except Exception as exc:
+            print(f"  [{time.strftime('%H:%M:%S')}] Error querying jobset {jobset_id}: {exc}")
+
+        remaining = int(deadline - time.time())
+        print(f"  [{time.strftime('%H:%M:%S')}] No jobs yet in jobset {jobset_id}, "
+              f"retrying in 15s ({remaining}s remaining) ...")
+        time.sleep(15)
+
+    raise RuntimeError(f"No jobs appeared in jobset {jobset_id} after 60 minutes.")
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 MAX_ITERATIONS = 6
@@ -474,7 +527,7 @@ def main():
                 # -- 1. Analyse failed job & invoke Copilot --------------------
                 nonlocal job_id
                 if job_id:
-                    output_dir = args.output_dir or Path(f"job_{job_id}_artifacts")
+                    output_dir = args.output_dir or Path(tempfile.gettempdir()) / f"job_{job_id}_artifacts"
                     prompt = build_prompt_for_job(job_id, user_prompt, output_dir)
                 else:
                     prompt = user_prompt
@@ -510,10 +563,14 @@ def main():
 
                 match = _re.search(r"New Jobset ID:\s*(\d+)", result.stdout)
                 if not match:
-                    print("  ABORTING: Could not determine new job ID from gtaxreruner output.")
+                    print("  ABORTING: Could not determine new jobset ID from gtaxreruner output.")
                     sys.exit(1)
-                new_job_id = int(match.group(1))
-                print(f"  New job/jobset ID: {new_job_id}")
+                new_jobset_id = int(match.group(1))
+                print(f"  New jobset ID: {new_jobset_id}")
+
+                # Resolve first job ID from the jobset
+                new_job_id = get_first_job_in_jobset(new_jobset_id)
+                print(f"  First job ID in jobset: {new_job_id}")
 
                 # -- 4. Wait for job to complete (2h) --------------------------
                 job_data = wait_for_job_completion(new_job_id)

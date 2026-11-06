@@ -1,0 +1,91 @@
+Problem
+=======
+The ABN script raised: Exception: "Benchmark starting screen not detected" while waiting for Strange Brigade benchmark to begin. Logs show the game reached Main Menu but the test never saw the expected "benchmark starting" screen.
+
+Root cause
+==========
+OCR/screenshot-based detection is too strict: single phrase/template expected, no robust fallback when UI text/position changes or Steam overlay/main menu delays the benchmark start.
+
+Proposed fix
+============
+1) Broaden detection: try multiple OCR phrases and (optional) image templates.
+2) Add a fallback: if "Main Menu" is detected, simulate the keystrokes/mouse to start the benchmark and keep polling.
+3) Increase default timeout and add retry/poll loop.
+
+Suggested replacement for wait_for_benchmark_start (pseudocode / drop-in):
+
+import time
+
+def wait_for_benchmark_start(ocr, timeout=90, poll_interval=2):
+    """Waits for benchmark start screen with multiple fallbacks.
+
+    - Tries several OCR phrases.
+    - Tries template matching if available.
+    - If "Main Menu" detected, attempt to start the benchmark (send keys) and continue waiting.
+    """
+    candidates = [
+        "Benchmark starting",
+        "Start Benchmark",
+        "Starting benchmark",
+        "Begin benchmark",
+    ]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # try OCR phrases quickly
+        for ph in candidates:
+            try:
+                if ocr.wait_for_text(ph, timeout=1):
+                    return
+            except Exception:
+                pass
+
+        # try template/image detection (if your framework supports it)
+        try:
+            # replace 'benchmark_start.png' with the actual template name if available
+            if hasattr(ocr, 'find_template') and ocr.find_template('benchmark_start.png', threshold=0.6):
+                return
+        except Exception:
+            pass
+
+        # fallback: if Main Menu visible, try to start benchmark via input
+        try:
+            if ocr.wait_for_text('Main Menu', timeout=1):
+                # Use the project's input helper to send the proper keys to navigate to benchmark
+                # Example: windows.include.input.send_keys(['{ENTER}'])
+                try:
+                    from windows.include import input_utils
+                    input_utils.send_keys(['{ENTER}'])
+                except Exception:
+                    # best-effort: continue polling
+                    pass
+                # allow UI to react
+                time.sleep(3)
+                continue
+        except Exception:
+            pass
+
+        time.sleep(poll_interval)
+
+    raise Exception('Benchmark starting screen not detected')
+
+Notes
+-----
+- Replace input_utils.send_keys call with the actual helper used by ABN (e.g., windows.include.* or lib.windows.input).
+- Consider adding a template image (benchmark_start.png) to game's templates if image matching is available.
+- Tune timeout/poll_interval to your lab readiness.
+
+How to apply
+============
+1. Edit:
+   C:\gta_test_abn\workspace_9000\abn_unzipped\ABN-v2.9.335-all\src\scripts\windows\python\games\StrangeBrigade\include\MenuActions.py
+2. Replace the wait_for_benchmark_start implementation with the snippet above.
+3. (Optional) Add image templates used by find_template.
+4. Re-run the GTA-X job.
+
+Automated option
+----------------
+To ask Copilot to generate a patch automatically, run this tool in the environment that has Copilot configured:
+
+python bugfixer.py --job-id 110597889 --prompt "Make a robust fix in file C:\\gta_test_abn\\workspace_9000\\abn_unzipped\\ABN-v2.9.335-all\\src\\scripts\\windows\\python\\games\\StrangeBrigade\\include\\MenuActions.py: replace the wait_for_benchmark_start function so it checks multiple OCR phrases, optionally matches an image template, falls back to detect the Main Menu and triggers benchmark start via simulated input, and increases timeout/retries. Make necessary imports and helper calls consistent with the project. Produce a minimal, well-tested change."
+
+I saved this suggestion here. Want me to produce a unified diff next and commit it to a patch file?
